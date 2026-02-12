@@ -1590,10 +1590,11 @@ post_t* instance_t::parse_post(char* line, std::streamsize len, account_t* accou
       balance_t diff = amt;
 
       // apply balance_filter tag
-      value_t account_total;
+      optional<expr_t> filter_expr;
+      optional<expr_t&> filter_expr_ref;
+      symbol_scope_t filter_scope(*context.scope);
       if (optional<value_t> filter_tag = post->get_tag(_("balance_filter"))) {
-        // add "balance_post" to the scope so the user can reference is
-        symbol_scope_t filter_scope(*context.scope);
+        // add "balance_post" to the scope so the user can reference it
         filter_scope.define(symbol_t::FUNCTION, "balance_post",
                             expr_t::op_t::wrap_value(scope_value(&*post)));
         // create an identifier for the target post amount
@@ -1605,38 +1606,15 @@ post_t* instance_t::parse_post(char* line, std::streamsize len, account_t* accou
             expr_t::op_t::new_node(expr_t::op_t::O_QUERY, expr_t(filter_tag->to_string()).get_op(),
                                    expr_t::op_t::new_node(expr_t::op_t::O_COLON, amount_ident,
                                                           expr_t::op_t::wrap_value(amount_t(0.))));
-        expr_t filter_expr(filter_op, &filter_scope);
-        account_total =
-            post->account->amount(!post->has_flags(POST_VIRTUAL | POST_IS_TIMELOG), filter_expr)
-                .strip_annotations(keep_details_t());
-
-        // Subtract amounts from previous posts to this account in the xact.
-        for (post_t* p : xact->posts) {
-          if (p->account == post->account && (!p->has_flags(POST_VIRTUAL | POST_IS_TIMELOG) ||
-                                              post->has_flags(POST_VIRTUAL | POST_IS_TIMELOG))) {
-            value_t tmp;
-            p->add_to_value(tmp, filter_expr);
-            diff -= tmp.as_amount();
-            DEBUG("textual.parse", "line " << balance_linenum << ": "
-                                           << "Subtracting " << amt << ", diff = " << diff);
-          }
-        }
-      } else {
-        account_total = post->account->amount(!post->has_flags(POST_VIRTUAL))
-                            .strip_annotations(keep_details_t());
-
-        // Subtract amounts from previous posts to this account in the xact.
-        for (post_t* p : xact->posts) {
-          if (p->account == post->account &&
-              (!p->has_flags(POST_VIRTUAL) || post->has_flags(POST_VIRTUAL))) {
-            value_t tmp;
-            p->add_to_value(tmp);
-            diff -= tmp.as_amount();
-            DEBUG("textual.parse", "line " << balance_linenum << ": "
-                                           << "Subtracting " << amt << ", diff = " << diff);
-          }
-        }
+        filter_expr = expr_t(filter_op, &filter_scope);
+        filter_expr_ref = *filter_expr;
       }
+
+      value_t account_total =
+        post->account->amount(
+          !post->has_flags(POST_VIRTUAL | POST_IS_TIMELOG),
+          filter_expr_ref
+        ).strip_annotations(keep_details_t());
 
       DEBUG("post.assign", "line " << balance_linenum << ": "
                                    << "account balance = " << account_total);
@@ -1668,6 +1646,18 @@ post_t* instance_t::parse_post(char* line, std::streamsize len, account_t* accou
       DEBUG("post.assign", "line " << balance_linenum << ": " << "diff = " << diff);
       DEBUG("textual.parse", "line " << balance_linenum << ": "
                                      << "POST assign: diff = " << diff);
+
+      // Subtract amounts from previous posts to this account in the xact.
+      for (post_t* p : xact->posts) {
+        if (p->account == post->account && (!p->has_flags(POST_VIRTUAL | POST_IS_TIMELOG) ||
+                                            post->has_flags(POST_VIRTUAL | POST_IS_TIMELOG))) {
+          value_t tmp;
+          p->add_to_value(tmp, filter_expr_ref);
+          diff -= tmp.as_amount();
+          DEBUG("textual.parse", "line " << balance_linenum << ": "
+                                         << "Subtracting " << amt << ", diff = " << diff);
+        }
+      }
 
       // If amt has a commodity, restrict balancing to that. Otherwise, it's the blanket '0' and
       // check that all of them are zero.
